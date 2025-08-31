@@ -1,69 +1,123 @@
-# IG Trim — Follow/Unfollow Helper for Instagram (macOS)
+ig-trim — Triage Who You Follow On Instagram
 
-A small Bash script that compares your **followers** vs **following** from an Instagram data export, then walks you through the accounts you follow who don’t follow you back. You can:
+What this does
+- Compares your “following” vs. “followers” from Instagram’s data export.
+- Shows each account you follow that doesn’t follow you back.
+- Lets you act with single-key shortcuts, no Enter required:
+  - o: open profile in browser and move to next
+  - O: open profile and stay on the same user
+  - k: keep (adds to whitelist so they won’t show next time)
+  - u: queue for unfollow (creates a list to process later)
+  - s: skip
+  - q: quit (asks to confirm with y)
 
-- open each profile in your browser
-- whitelist accounts you’re fine keeping (artists, brands, friends who live under rocks)
-- mark accounts for unfollow
-- save a persistent whitelist so future runs skip approved accounts
-- export a clean `to_unfollow.txt` with clickable profile links
+Outputs
+- .ig_whitelist.txt: A running “keep” list. Lowercase, sorted, de‑duplicated.
+- to_unfollow.txt: Lines like “@username https://www.instagram.com/username/”. De‑duplicated by username.
 
-> ⚠️ This does **not** auto-unfollow for you. It keeps your account safe and avoids Instagram’s anti-automation rules. You’ll click profiles and unfollow manually.
+What you need
+- macOS with the default zsh shell.
+- A web browser (Firefox, Chrome, Safari, etc.).
+- Your Instagram data export (HTML format) containing Followers and Following.
 
----
+Step 1 — Download your Instagram data
+Instagram now routes exports through Accounts Center.
 
-## Contents
-- [What you’ll need](#what-youll-need)
-- [Export your Instagram data (followers & following)](#export-your-instagram-data-followers--following)
-- [Download this tool](#download-this-tool)
-- [Run it](#run-it)
-- [What the script does](#what-the-script-does)
-- [Command options](#command-options)
-- [Example session](#example-session)
-- [Troubleshooting](#troubleshooting)
-- [FAQ](#faq)
-- [Privacy](#privacy)
-- [Contributing](#contributing)
-- [License](#license)
+1) On your phone or desktop browser, open Instagram and go to:
+   - Settings and privacy → Accounts Center → Your information and permissions → Download your information.
+2) Choose your Instagram account if asked.
+3) Pick “Some of your information”, then select “Followers and following”. Use "All Time" for the date range. 
+4) Delivery method: “Download to device”.
+5) Format: HTML (not JSON).
+6) Submit and wait for the email. It can take a few minutes to hours.
+7) Download the ZIP from the link you receive.
 
----
+Inside the ZIP
+- You’ll find folders similar to:
+  - instagram-<your_username>-connections/followers_and_following/
+    - following.html
+    - followers_1.html, followers_2.html, … (one or more files)
 
-## What you’ll need
-- macOS (tested on recent versions)
-- Terminal
-- The HTML files from Instagram’s export:
-  - `followers_1.html` (you may have more than one if Instagram splits it)
-  - `following.html`
+Step 2 — Prepare a folder for ig-trim
+1) Create a new folder on your Mac (e.g., Desktop/ig-trim).
+2) Copy these files into that folder:
+   - following.html
+   - all followers_*.html files
+3) Optionally, if you already keep a whitelist, copy your existing .ig_whitelist.txt into the same folder. If not present, the script will create it.
+4) Save ig-trim.zsh into the same folder.
 
-Built-in tools used: `grep`, `sed`, `awk`, `sort`, `comm`, `open` (all standard on macOS).
+Step 3 — Run the script
+1) Open Terminal (or iTerm/Hyper/VS Code terminal).
+2) Change to your folder, for example:
+   - cd ~/Desktop/ig-trim
+3) Make the script executable (first time only):
+   - chmod +x ig-trim.zsh
+4) Run it:
+   - ./ig-trim.zsh
 
----
+What you’ll see
+- A count of accounts you follow that don’t follow you back (excluding your whitelist).
+- For each account, a line like:
+  - [3/120] @someuser -> o:open&next O:open&stay k:keep u:queue s:skip q:quit
+- Press a single key to act; you don’t need Enter.
 
-## Export your Instagram data (followers & following)
+Browser opening behavior (no focus steal)
+- The script opens profiles in the background so your terminal stays focused.
+- If you set the environment variable BROWSER (e.g., “Firefox” or “Google Chrome”), it will try that app first.
+  - Example: BROWSER="Firefox" ./ig-trim.zsh
+- Otherwise it tries Firefox by bundle id, then your default browser.
 
-1. Open Instagram (mobile app or web) and go to **Accounts Center**.
-2. Navigate to **Your information and permissions** → **Download your information**.
-3. Choose your Instagram profile.
-4. Pick **Some of your information** and select:
-   - **Followers**
-   - **Following**
-5. Format: **HTML**
-6. Date range: **All time** (or whatever you want)
-7. Submit the request and wait for the download link from Meta.
-8. Download and unzip. Inside you’ll find something like:
-   - `followers_1.html` (possibly `followers_2.html`, etc.)
-   - `following.html`
+After you finish
+- The script saves:
+  - .ig_whitelist.txt (merged with any “k” choices you made)
+  - to_unfollow.txt (merged with any “u” choices you made)
+- You can re-run the script anytime; accounts in your whitelist are skipped automatically.
 
-> Tip: Put these HTML files in a folder together with the script.
+Tips and common questions
+- Where do I find the followers/following files?
+  - In the downloaded ZIP: instagram-<your_username>-connections/followers_and_following/
+  - Copy following.html and every followers_*.html into the same folder as ig-trim.zsh.
+- I pressed o but the browser took focus.
+  - The script uses background opening. If the browser needs to launch for the first time, macOS may bring it forward just once. After it’s running, subsequent opens should not steal focus.
+- Keys seem to require Enter.
+  - Make sure you’re running the included script (./ig-trim.zsh) and not an older copy.
+  - If using VS Code or Hyper, single‑key reads should still work. If not, try the macOS Terminal app to verify your setup.
+- Can I edit the whitelist manually?
+  - Yes. One username per line, no @ symbol. The script lowercases, sorts, and de‑duplicates it automatically on the next run.
+- What if my export only has following.html but no followers_*.html?
+  - Request the export again and be sure to select “Followers and following” in Accounts Center.
+- Is my data safe?
+  - The script runs locally and only reads the HTML files you put in the folder. Nothing is uploaded anywhere.
 
----
+Advanced options (optional)
+- You can override default filenames via environment variables:
+  - IG_FOLLOWERS_GLOB: default followers_*.html
+  - IG_FOLLOWING_FILE: default following.html
+  - IG_WHITELIST_FILE: default .ig_whitelist.txt
+  - IG_OUTPUT_FILE:    default to_unfollow.txt
+  - Examples:
+    - IG_FOLLOWERS_GLOB='followers_2024_*.html' ./ig-trim.zsh
+    - IG_WHITELIST_FILE='my_keep_list.txt' ./ig-trim.zsh
 
-## Download this tool
+Troubleshooting
+- “Nothing to review” appears, but I have many accounts.
+  - Ensure you copied following.html and all followers_*.html into the same folder as the script.
+  - Make sure you exported in HTML format from Accounts Center.
+- “Invalid key” messages appear between prompts.
+  - This usually means an older script version is being run. Ensure you’re launching ./ig-trim.zsh from this folder.
+  - If you switched terminals mid‑run, stop the script and run it fresh.
+- Permission denied when running the script.
+  - Run: chmod +x ig-trim.zsh, then try again.
 
-```bash
-# Using git (recommended)
-git clone https://github.com/<your-username>/ig-trim.git
-cd ig-trim
+Unfollow workflow suggestion
+- to_unfollow.txt is a queue you can process at your pace.
+- Open it in your editor, click the links, and unfollow in Instagram.
+- Keep the file as a journal or clear lines as you go.
 
-# Make the script executable
-chmod +x ig-trim.sh
+Known limitations
+- This tool relies on Instagram’s export HTML format. If Instagram changes that structure, parsing may need updates.
+- Tested on macOS with zsh. Other platforms or shells are not supported.
+
+License
+- Personal use. No warranty. Use at your own risk.
+
