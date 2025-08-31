@@ -18,17 +18,35 @@ out_file=${IG_OUTPUT_FILE:-to_unfollow.txt}
 LC_ALL=C
 
 # Ensure whitelist exists and is unique early
-touch -- "$whitelist_file" 2>/dev/null || :
+touch "$whitelist_file" 2>/dev/null || :
 if [[ -s "$whitelist_file" ]]; then
-  # Normalize: lower-case and unique
+  # Normalize: lower-case and unique (BSD awk: no "--")
   tmpw=$(mktemp -t igtrim-wl.XXXXXX)
-  awk '{print tolower($0)}' -- "$whitelist_file" | sed '/^$/d' | sort -u >| "$tmpw" && mv "$tmpw" "$whitelist_file"
+  awk '{print tolower($0)}' "$whitelist_file" | sed '/^$/d' | sort -u >| "$tmpw" && mv "$tmpw" "$whitelist_file"
 fi
 
 # Open a dedicated TTY for prompts/keys, with fallback to stdio
 if ! exec 3<>/dev/tty 2>/dev/null; then
   exec 3<&0 3>&1
 fi
+
+# Colors for TTY output on FD 3
+if [[ -t 3 ]]; then
+  R=$'\033[0m'     # reset
+  BLD=$'\033[1m'   # bold
+  DIM=$'\033[2m'   # dim
+  RED=$'\033[31m'
+  GRN=$'\033[32m'
+  YLW=$'\033[33m'
+  BLU=$'\033[34m'
+  MAG=$'\033[35m'
+  CYN=$'\033[36m'
+else
+  R="" BLD="" DIM="" RED="" GRN="" YLW="" BLU="" MAG="" CYN=""
+fi
+
+# Debug helper (enable with IG_DEBUG=1)
+dbg() { [[ -n "${IG_DEBUG:-}" ]] && print -u3 -- "${DIM}$*${R}"; }
 
 # Drain any pending CR/LF from TTY so prompts don’t get polluted
 drain_tty() {
@@ -62,7 +80,7 @@ prompt_key() {
 
 confirm_quit() {
   local ans
-  print -n -u3 -- "Quit? [y/N]: "
+  print -n -u3 -- "${YLW}Quit?${R} [y/N]: "
   local savein
   exec {savein}<&0
   exec 0<&3
@@ -89,21 +107,20 @@ _collect_usernames() {
   (( ${#files} )) || return 0
 
   {
-    # Common: title="username"
-    grep -aEho 'title="[A-Za-z0-9._]+"' -- "$files[@]" 2>/dev/null | \
-      sed -E 's/.*title="([A-Za-z0-9._]+)".*/\1/'
-    # Fallback: href="/username/" (single-segment)
-    grep -aEho 'href="/[A-Za-z0-9._]+/"' -- "$files[@]" 2>/dev/null | \
-      sed -E 's#.*href="/([A-Za-z0-9._]+)/".*#\1#'
-  } | \
-  awk '{print tolower($0)}' | \
-  grep -avE '^(explore|accounts|about|privacy|terms|directory|stories|create|challenge|web|p)$' | \
-  sed '/^$/d' | sort -u
+    # title="username"
+    grep -aEho 'title="[A-Za-z0-9._]+"' "$files[@]" 2>/dev/null | sed -E 's/.*title="([A-Za-z0-9._]+)".*/\1/'
+    # href="/username/"
+    grep -aEho 'href="/[A-Za-z0-9._]+/"' "$files[@]" 2>/dev/null | sed -E 's#.*href="/([A-Za-z0-9._]+)/".*#\1#'
+    # Absolute URL https://www.instagram.com/username (works on single-line files)
+    grep -aEho 'https?://(www\.)?instagram\.com/[A-Za-z0-9._]+' "$files[@]" 2>/dev/null | sed -E 's#https?://(www\.)?instagram\.com/##'
+  } | awk '{print tolower($0)}' | \
+      grep -avE '^(explore|accounts|about|privacy|terms|directory|stories|create|challenge|web|p|tv|reels|about|press|blog|legal|topics|changelog)$' | \
+      sed '/^$/d' | sort -u
 }
 
 # Load source data
 if [[ ! -r "$following_file" ]]; then
-  print -u3 -- "following file not found: $following_file"
+  print -u3 -- "${RED}following file not found:${R} $following_file"
   exec 3<&-
   exit 1
 fi
@@ -113,6 +130,7 @@ following_list=()
 followers_list=()
 
 while IFS= read -r u; do following_list+="$u"; done < <(_collect_usernames "$following_file")
+dbg "following count: ${#following_list[@]}"
 
 # Expand followers glob; OK if none
 typeset -a followers_files
@@ -120,6 +138,7 @@ followers_files=($~followers_glob(N))
 if (( ${#followers_files} )); then
   while IFS= read -r u; do followers_list+="$u"; done < <(_collect_usernames "${followers_files[@]}")
 fi
+dbg "followers count: ${#followers_list[@]} from ${#followers_files[@]} file(s)"
 
 # Load whitelist
 typeset -a persisted_whitelist
@@ -127,6 +146,7 @@ persisted_whitelist=()
 if [[ -r "$whitelist_file" ]]; then
   while IFS= read -r u; do [[ -n "$u" ]] && persisted_whitelist+="$u"; done < "$whitelist_file"
 fi
+dbg "whitelist count: ${#persisted_whitelist[@]}"
 
 # Build sets
 typeset -A set_following set_followers set_whitelist
@@ -145,9 +165,10 @@ for u in "$following_list[@]"; do
   [[ -n ${set_whitelist[$u]:-} ]] && continue
   candidates+="$u"
 done
+dbg "candidates count: ${#candidates[@]}"
 
 if (( ${#candidates} == 0 )); then
-  print -u3 -- "Nothing to review. You're all good!"
+  print -u3 -- "${GRN}Nothing to review. You're all good!${R}"
   exec 3<&-
   exit 0
 fi
@@ -166,16 +187,16 @@ typeset -a users
 users=()
 while IFS= read -r -u4 u; do users+="$u"; done
 
-print -u3 -- "Reviewing ${#users} profiles. Keys: o/O/k/u/s/q"
+print -u3 -- "${CYN}Reviewing ${#users} profiles${R}. Keys: ${CYN}o/O/k/u/s/q${R}"
 
-# Main loop
-typeset -i idx=0 total=${#users}
-while (( idx < total )); do
+# Main loop (zsh arrays are 1-based)
+typeset -i idx=1 total=${#users}
+while (( idx <= total )); do
   user=${users[idx]}
   url="https://www.instagram.com/${user}/"
   while true; do
-    print -u3 -- "[$((idx+1))/$total] @${user} -> o:open&next O:open&stay k:keep u:queue s:skip q:quit"
-    prompt_key "> "
+    print -u3 -- "${DIM}[${idx}/${total}]${R} ${MAG}@${user}${R} -> ${CYN}o${R}:open&next ${CYN}O${R}:open&stay ${GRN}k${R}:keep ${YLW}u${R}:queue ${BLU}s${R}:skip ${YLW}q${R}:quit"
+    prompt_key "${GRN}> ${R}"
     key="$reply"
     case "$key" in
       $'\r'|$'\n'|$'\t')
@@ -210,7 +231,7 @@ while (( idx < total )); do
         fi
         ;;
       *)
-        print -u3 -- "Invalid key. Use o/O/k/u/s/q."
+        print -u3 -- "${RED}Invalid key.${R} Use ${CYN}o/O${R}/${GRN}k${R}/${YLW}u${R}/${BLU}s${R}/${YLW}q${R}."
         ;;
     esac
   done
@@ -223,7 +244,7 @@ exec 4<&-
 # Merge session keep into persistent whitelist (lowercase, unique)
 if [[ -s "$sess_keep_tmp" ]]; then
   tmpw=$(mktemp -t igtrim-wl.XXXXXX)
-  awk '{print tolower($0)}' -- "$whitelist_file" "$sess_keep_tmp" | sed '/^$/d' | sort -u >| "$tmpw" && mv "$tmpw" "$whitelist_file"
+  awk '{print tolower($0)}' "$whitelist_file" "$sess_keep_tmp" | sed '/^$/d' | sort -u >| "$tmpw" && mv "$tmpw" "$whitelist_file"
 fi
 
 # Merge session unfollow into queue, de-duping by username token
@@ -236,6 +257,8 @@ if [[ -s "$sess_unf_tmp" ]]; then
   fi
   mv "$tmpu" "$out_file"
 fi
+
+# (dbg() moved near top with color support)
 
 # Cleanup
 rm -f -- "$users_tmp" "$sess_keep_tmp" "$sess_unf_tmp" 2>/dev/null || :
