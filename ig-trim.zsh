@@ -1,191 +1,243 @@
-#!/bin/zsh
-# Instagram follower/following triage (zsh, no-args, single-key, open-and-advance)
+#!/usr/bin/env zsh
 
-emulate -L zsh
+# ig-trim: Review who you follow but doesn’t follow you back
+# - No args UX with defaults
+# - Single-key controls (no Enter), robust TTY handling
+# - Background tab opening (no focus steal)
+# - Keeps whitelist and unfollow queue de-duplicated
+
 set -u
 setopt pipefail
 
-# Defaults
-WHITELIST_FILE=".ig_whitelist.txt"
-TO_UNFOLLOW_OUT="to_unfollow.txt"
-FOLLOWING_FILE="following.html"
+# Defaults (override via env if desired)
+followers_glob=${IG_FOLLOWERS_GLOB:-followers_*.html}
+following_file=${IG_FOLLOWING_FILE:-following.html}
+whitelist_file=${IG_WHITELIST_FILE:-.ig_whitelist.txt}
+out_file=${IG_OUTPUT_FILE:-to_unfollow.txt}
 
-# Gather followers files
-setopt NULL_GLOB
-FOLLOWER_FILES=(followers_*.html)
-unsetopt NULL_GLOB
+LC_ALL=C
 
-die() { print -u2 "Error: $*"; exit 1; }
+# Ensure whitelist exists and is unique early
+touch -- "$whitelist_file" 2>/dev/null || :
+if [[ -s "$whitelist_file" ]]; then
+  # Normalize: lower-case and unique
+  tmpw=$(mktemp -t igtrim-wl.XXXXXX)
+  awk '{print tolower($0)}' -- "$whitelist_file" | sed '/^$/d' | sort -u >| "$tmpw" && mv "$tmpw" "$whitelist_file"
+fi
 
-# Validate files
-(( ${#FOLLOWER_FILES[@]} > 0 )) || die "Couldn't find any followers_*.html in the current folder."
-[[ -f "$FOLLOWING_FILE" ]] || die "Couldn't find $FOLLOWING_FILE in the current folder."
+# Open a dedicated TTY for prompts/keys, with fallback to stdio
+if ! exec 3<>/dev/tty 2>/dev/null; then
+  exec 3<&0 3>&1
+fi
 
-# Extract usernames from IG export HTML
-extract_usernames() {
-  local file="$1"
-  grep -oE 'https?://(www\.)?instagram\.com/[^" ?#]+' "$file" \
-  | sed -E 's#https?://(www\.)?instagram\.com/##; s#/$##' \
-  | awk -F'/' '{print $1}' \
-  | grep -E '^[A-Za-z0-9._]+' \
-  | grep -vE '^(accounts|explore|reels|p|tv|about|press|blog|legal|privacy|directory|topics|changelog)$' \
-  | LC_ALL=C sort -u
+# Drain any pending CR/LF from TTY so prompts don’t get polluted
+drain_tty() {
+  local dump
+  while IFS= read -t 0 -k 1 -u3 dump 2>/dev/null; do :; done
+  sleep 0.02 2>/dev/null || :
+  while IFS= read -t 0 -k 1 -u3 dump 2>/dev/null; do :; done
 }
 
-tmpdir="$(mktemp -d)"
-cleanup() { rm -rf "$tmpdir" 2>/dev/null || true; }
-trap cleanup EXIT
-
-followers_all="$tmpdir/followers.txt"
-: > "$followers_all"
-for f in "${FOLLOWER_FILES[@]}"; do
-  extract_usernames "$f" >> "$followers_all"
-done
-LC_ALL=C sort -u "$followers_all" -o "$followers_all"
-
-following_all="$tmpdir/following.txt"
-extract_usernames "$FOLLOWING_FILE" > "$following_all"
-LC_ALL=C sort -u "$following_all" -o "$following_all"
-
-# Ensure whitelist exists but don't clobber it
-touch "$WHITELIST_FILE"
-LC_ALL=C sort -u "$WHITELIST_FILE" -o "$WHITELIST_FILE"
-
-# Compute following-not-followers, then minus whitelist
-LC_ALL=C comm -23 "$following_all" "$followers_all" > "$tmpdir/following_not_followers.txt"
-LC_ALL=C comm -23 "$tmpdir/following_not_followers.txt" "$WHITELIST_FILE" > "$tmpdir/nonfollowers.txt"
-
-count=$(wc -l < "$tmpdir/nonfollowers.txt" | tr -d '[:space:]')
-print "Found $count accounts you follow that don't follow back (excluding whitelist).\n"
-print "Controls: [o]=open & next  [O]=open & stay  [k]=keep  [u]=unfollow  [s]=skip  [q]=quit\n"
-
-# Open dedicated FDs:
-#  - 3: real TTY for prompts (read+write)
-#  - 4: the list of users to process (read-only)
-if ! exec 3<>/dev/tty; then
-  die "Couldn't open /dev/tty. Run from Terminal or iTerm (not a headless runner)."
-fi
-if ! exec 4<"$tmpdir/nonfollowers.txt"; then
-  die "Couldn't open list of users."
-fi
-
-session_whitelist="$tmpdir/session_whitelist.txt"
-session_unfollow="$tmpdir/session_unfollow.txt"
-: > "$session_whitelist"
-: > "$session_unfollow"
-
-# Single-key prompt from TTY (no Enter). Returns lowercase char except 'O' kept as uppercase.
+# Read single key (no Enter) from FD 3. Echo newline. Drain residuals.
+# Returns: key in $reply (zsh builtin), lowercased except capital O preserved.
 prompt_key() {
-  local msg="$1" key=""
-  # print prompt
+  local msg="$1" key
   print -n -u3 -- "$msg"
-  # read exactly one keypress
-  if ! IFS= read -k 1 -u3 key; then
-    # if read fails, default to skip
-    print "s"
-    return
-  fi
-  # echo the key so user sees it
+  local savein
+  exec {savein}<&0
+  exec 0<&3
+  IFS= read -s -k 1 key || key=""
+  exec 0<&$savein
+  exec {savein}<&-
   print -u3 ""
-  # keep uppercase O special; everything else lowercased
-  if [[ "$key" == "O" ]]; then
-    print "O"
+  drain_tty
+  if [[ -z "$key" ]]; then
+    reply="s"
+  elif [[ "$key" == "O" ]]; then
+    reply="O"
   else
-    print "${key:l}"
+    reply="${key:l}"
   fi
 }
 
 confirm_quit() {
-  local key
-  print -u3 "Quit? [y/N]: "
-  if IFS= read -k 1 -u3 key; then
-    print -u3 ""
-    [[ "${key:l}" == "y" ]] && return 0
-  fi
-  return 1
+  local ans
+  print -n -u3 -- "Quit? [y/N]: "
+  local savein
+  exec {savein}<&0
+  exec 0<&3
+  IFS= read -s -k 1 ans || ans=""
+  exec 0<&$savein
+  exec {savein}<&-
+  print -u3 ""
+  drain_tty
+  [[ "${ans:l}" == "y" ]]
 }
 
 open_url() {
   local url="$1"
-  # Honor $BROWSER first (e.g., "Firefox", "Google Chrome")
   if [[ -n "${BROWSER:-}" ]]; then
-    open -a "$BROWSER" "$url" 2>/dev/null && return
+    open -g -a "$BROWSER" "$url" 2>/dev/null && return
   fi
-  # Prefer Firefox’s bundle id; fallback to default
-  open -b org.mozilla.firefox "$url" 2>/dev/null || open "$url"
+  open -g -b org.mozilla.firefox "$url" 2>/dev/null || open -g "$url"
 }
 
-i=0
-# Read users from FD 4 (not via redirection), so stdin stays free
-while IFS= read -r -u4 user; do
-  (( i++ ))
-  url="https://www.instagram.com/${user}"
-  print "[$i/$count] @$user  ->  $url"
+# Extract usernames from given files; emits one lowercase username per line
+_collect_usernames() {
+  local -a files=()
+  for f in "$@"; do [[ -r "$f" ]] && files+="$f"; done
+  (( ${#files} )) || return 0
+
+  {
+    # Common: title="username"
+    grep -aEho 'title="[A-Za-z0-9._]+"' -- "$files[@]" 2>/dev/null | \
+      sed -E 's/.*title="([A-Za-z0-9._]+)".*/\1/'
+    # Fallback: href="/username/" (single-segment)
+    grep -aEho 'href="/[A-Za-z0-9._]+/"' -- "$files[@]" 2>/dev/null | \
+      sed -E 's#.*href="/([A-Za-z0-9._]+)/".*#\1#'
+  } | \
+  awk '{print tolower($0)}' | \
+  grep -avE '^(explore|accounts|about|privacy|terms|directory|stories|create|challenge|web|p)$' | \
+  sed '/^$/d' | sort -u
+}
+
+# Load source data
+if [[ ! -r "$following_file" ]]; then
+  print -u3 -- "following file not found: $following_file"
+  exec 3<&-
+  exit 1
+fi
+
+typeset -a following_list followers_list
+following_list=()
+followers_list=()
+
+while IFS= read -r u; do following_list+="$u"; done < <(_collect_usernames "$following_file")
+
+# Expand followers glob; OK if none
+typeset -a followers_files
+followers_files=($~followers_glob(N))
+if (( ${#followers_files} )); then
+  while IFS= read -r u; do followers_list+="$u"; done < <(_collect_usernames "${followers_files[@]}")
+fi
+
+# Load whitelist
+typeset -a persisted_whitelist
+persisted_whitelist=()
+if [[ -r "$whitelist_file" ]]; then
+  while IFS= read -r u; do [[ -n "$u" ]] && persisted_whitelist+="$u"; done < "$whitelist_file"
+fi
+
+# Build sets
+typeset -A set_following set_followers set_whitelist
+set_following=()
+set_followers=()
+set_whitelist=()
+for u in "$following_list[@]"; do set_following[$u]=1; done
+for u in "$followers_list[@]"; do set_followers[$u]=1; done
+for u in "$persisted_whitelist[@]"; do set_whitelist[$u]=1; done
+
+# Compute candidates: following - followers - whitelist (preserve following order)
+typeset -a candidates
+candidates=()
+for u in "$following_list[@]"; do
+  [[ -n ${set_followers[$u]:-} ]] && continue
+  [[ -n ${set_whitelist[$u]:-} ]] && continue
+  candidates+="$u"
+done
+
+if (( ${#candidates} == 0 )); then
+  print -u3 -- "Nothing to review. You're all good!"
+  exec 3<&-
+  exit 0
+fi
+
+# Temp files for session state
+users_tmp=$(mktemp -t igtrim-users.XXXXXX)
+sess_keep_tmp=$(mktemp -t igtrim-keep.XXXXXX)
+sess_unf_tmp=$(mktemp -t igtrim-unf.XXXXXX)
+
+# Save candidate list and expose on FD 4 (read-only)
+printf "%s\n" "${candidates[@]}" >| "$users_tmp"
+exec 4<"$users_tmp"
+
+# Load users into memory (we keep FD 4 open as requested)
+typeset -a users
+users=()
+while IFS= read -r -u4 u; do users+="$u"; done
+
+print -u3 -- "Reviewing ${#users} profiles. Keys: o/O/k/u/s/q"
+
+# Main loop
+typeset -i idx=0 total=${#users}
+while (( idx < total )); do
+  user=${users[idx]}
+  url="https://www.instagram.com/${user}/"
   while true; do
-    key="$(prompt_key "(o/O/k/u/s/q): ")"
+    print -u3 -- "[$((idx+1))/$total] @${user} -> o:open&next O:open&stay k:keep u:queue s:skip q:quit"
+    prompt_key "> "
+    key="$reply"
     case "$key" in
-      o)  # open and advance
-        open_url "$url" || print "  ! couldn't open browser"
-        # advance by breaking inner loop
+      $'\r'|$'\n'|$'\t')
+        # Ignore stray whitespace keys silently
+        ;;
+      o)
+        open_url "$url"
+        (( idx++ ))
         break
         ;;
-      O)  # open and stay on this user
-        open_url "$url" || print "  ! couldn't open browser"
-        # stay in inner loop
+      O)
+        open_url "$url"
+        # stay on same user
         ;;
       k)
-        print "$user" >> "$session_whitelist"
-        print "  + whitelisted @$user"
+        print -- "$user" >>| "$sess_keep_tmp"
+        (( idx++ ))
         break
         ;;
       u)
-        printf "%s %s\n" "$user" "$url" >> "$session_unfollow"
-        print "  + queued to unfollow @$user"
+        print -- "@${user} ${url}" >>| "$sess_unf_tmp"
+        (( idx++ ))
         break
         ;;
       s)
-        print "  ~ skipped @$user"
+        (( idx++ ))
         break
         ;;
       q)
         if confirm_quit; then
-          print "Quitting early. Saving progress..."
-          # close FDs so cleanup still runs
-          exec 3<&-
-          exec 4<&-
-          # do outputs below after breaking out
-          goto_finish=1
-          break 2
+          break 2  # exit both loops
         fi
         ;;
       *)
-        print "Invalid key. Use o/O/k/u/s/q."
+        print -u3 -- "Invalid key. Use o/O/k/u/s/q."
         ;;
     esac
   done
-  print
 done
 
-# Close FDs
+# Close interactive FDs before writing outputs
 exec 3<&-
 exec 4<&-
 
-# Merge whitelist updates
-if [[ -s "$session_whitelist" ]]; then
-  cat "$session_whitelist" >> "$WHITELIST_FILE"
-  LC_ALL=C sort -u "$WHITELIST_FILE" -o "$WHITELIST_FILE"
+# Merge session keep into persistent whitelist (lowercase, unique)
+if [[ -s "$sess_keep_tmp" ]]; then
+  tmpw=$(mktemp -t igtrim-wl.XXXXXX)
+  awk '{print tolower($0)}' -- "$whitelist_file" "$sess_keep_tmp" | sed '/^$/d' | sort -u >| "$tmpw" && mv "$tmpw" "$whitelist_file"
 fi
 
-# Write to_unfollow with unique usernames and links
-if [[ -s "$session_unfollow" ]]; then
-  awk '!seen[$1]++' "$session_unfollow" > "$tmpdir/unfollow_unique.txt"
-  awk '{printf("@%s %s\n", $1, $2)}' "$tmpdir/unfollow_unique.txt" > "$TO_UNFOLLOW_OUT"
+# Merge session unfollow into queue, de-duping by username token
+if [[ -s "$sess_unf_tmp" ]]; then
+  tmpu=$(mktemp -t igtrim-unf.XXXXXX)
+  if [[ -s "$out_file" ]]; then
+    awk '!seen[$1]++' "$out_file" "$sess_unf_tmp" >| "$tmpu"
+  else
+    awk '!seen[$1]++' "$sess_unf_tmp" >| "$tmpu"
+  fi
+  mv "$tmpu" "$out_file"
 fi
 
-print "Done."
-print "Whitelist saved to: $WHITELIST_FILE"
-if [[ -s "$TO_UNFOLLOW_OUT" ]]; then
-  print "To-unfollow list saved to: $TO_UNFOLLOW_OUT"
-else
-  print "No accounts marked for unfollow this run."
-fi
+# Cleanup
+rm -f -- "$users_tmp" "$sess_keep_tmp" "$sess_unf_tmp" 2>/dev/null || :
+
+exit 0
