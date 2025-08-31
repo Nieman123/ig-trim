@@ -1,10 +1,7 @@
 #!/bin/zsh
-# Instagram follower/following triage (zsh, no-args, stable I/O)
+# Instagram follower/following triage (zsh, no-args, single-key, open-and-advance)
 
 emulate -L zsh
-# Don't use -e here; it can exit on benign nonzero statuses in loops
-# set -e
-# Safer defaults:
 set -u
 setopt pipefail
 
@@ -60,14 +57,13 @@ LC_ALL=C comm -23 "$tmpdir/following_not_followers.txt" "$WHITELIST_FILE" > "$tm
 
 count=$(wc -l < "$tmpdir/nonfollowers.txt" | tr -d '[:space:]')
 print "Found $count accounts you follow that don't follow back (excluding whitelist).\n"
-print "Controls: [o]pen  [k]eep (whitelist)  [u]nfollow  [s]kip  [q]uit\n"
+print "Controls: [o]=open & next  [O]=open & stay  [k]=keep  [u]=unfollow  [s]=skip  [q]=quit\n"
 
 # Open dedicated FDs:
-#  - 3: real TTY for user input
-#  - 4: the list of users to process
-# 3: TTY read+write for prompts, 4: read-only list of users
+#  - 3: real TTY for prompts (read+write)
+#  - 4: the list of users to process (read-only)
 if ! exec 3<>/dev/tty; then
-  die "Couldn't open /dev/tty. Run from Terminal (not a headless runner)."
+  die "Couldn't open /dev/tty. Run from Terminal or iTerm (not a headless runner)."
 fi
 if ! exec 4<"$tmpdir/nonfollowers.txt"; then
   die "Couldn't open list of users."
@@ -78,23 +74,44 @@ session_unfollow="$tmpdir/session_unfollow.txt"
 : > "$session_whitelist"
 : > "$session_unfollow"
 
-prompt_choice() {
-  local msg="$1" choice=""
+# Single-key prompt from TTY (no Enter). Returns lowercase char except 'O' kept as uppercase.
+prompt_key() {
+  local msg="$1" key=""
+  # print prompt
   print -n -u3 -- "$msg"
-  IFS= read -r -u3 choice || true
-  choice="$(printf "%s" "$choice" | tr '[:upper:]' '[:lower:]')"
-  [[ -z "$choice" ]] && print "s" || print "$choice"
+  # read exactly one keypress
+  if ! IFS= read -k 1 -u3 key; then
+    # if read fails, default to skip
+    print "s"
+    return
+  fi
+  # echo the key so user sees it
+  print -u3 ""
+  # keep uppercase O special; everything else lowercased
+  if [[ "$key" == "O" ]]; then
+    print "O"
+  else
+    print "${key:l}"
+  fi
+}
+
+confirm_quit() {
+  local key
+  print -u3 "Quit? [y/N]: "
+  if IFS= read -k 1 -u3 key; then
+    print -u3 ""
+    [[ "${key:l}" == "y" ]] && return 0
+  fi
+  return 1
 }
 
 open_url() {
   local url="$1"
-
-  # If user set $BROWSER, try that first (e.g., "Firefox", "Google Chrome")
+  # Honor $BROWSER first (e.g., "Firefox", "Google Chrome")
   if [[ -n "${BROWSER:-}" ]]; then
     open -a "$BROWSER" "$url" 2>/dev/null && return
   fi
-
-  # Prefer Firefox if present, otherwise fall back to system default
+  # Prefer Firefox’s bundle id; fallback to default
   open -b org.mozilla.firefox "$url" 2>/dev/null || open "$url"
 }
 
@@ -105,10 +122,16 @@ while IFS= read -r -u4 user; do
   url="https://www.instagram.com/${user}"
   print "[$i/$count] @$user  ->  $url"
   while true; do
-    choice="$(prompt_choice "(o/k/u/s/q): ")"
-    case "$choice" in
-      o)
+    key="$(prompt_key "(o/O/k/u/s/q): ")"
+    case "$key" in
+      o)  # open and advance
         open_url "$url" || print "  ! couldn't open browser"
+        # advance by breaking inner loop
+        break
+        ;;
+      O)  # open and stay on this user
+        open_url "$url" || print "  ! couldn't open browser"
+        # stay in inner loop
         ;;
       k)
         print "$user" >> "$session_whitelist"
@@ -125,11 +148,18 @@ while IFS= read -r -u4 user; do
         break
         ;;
       q)
-        print "Quitting early. Saving progress..."
-        break 2
+        if confirm_quit; then
+          print "Quitting early. Saving progress..."
+          # close FDs so cleanup still runs
+          exec 3<&-
+          exec 4<&-
+          # do outputs below after breaking out
+          goto_finish=1
+          break 2
+        fi
         ;;
       *)
-        print "Invalid choice. Use o/k/u/s/q."
+        print "Invalid key. Use o/O/k/u/s/q."
         ;;
     esac
   done
