@@ -100,6 +100,16 @@ open_url() {
   open -g -b org.mozilla.firefox "$url" 2>/dev/null || open -g "$url"
 }
 
+# Persist a kept username immediately into the whitelist (lowercase, unique)
+persist_keep_user() {
+  local name="${1:l}"
+  # Append then normalize + uniq
+  print -- "$name" >>| "$whitelist_file"
+  local tmpw
+  tmpw=$(mktemp -t igtrim-wl.XXXXXX) || return
+  awk '{print tolower($0)}' "$whitelist_file" | sed '/^$/d' | sort -u >| "$tmpw" && mv "$tmpw" "$whitelist_file"
+}
+
 # Extract usernames from given files; emits one lowercase username per line
 _collect_usernames() {
   local -a files=()
@@ -213,6 +223,8 @@ while (( idx <= total )); do
         ;;
       k)
         print -- "$user" >>| "$sess_keep_tmp"
+        persist_keep_user "$user"
+        print -u3 -- "${GRN}+ saved to whitelist${R}"
         (( idx++ ))
         break
         ;;
