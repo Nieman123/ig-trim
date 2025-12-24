@@ -1,5 +1,14 @@
 #!/usr/bin/env zsh
 
+# Re-exec with zsh if invoked via another shell.
+if [[ -z "${ZSH_VERSION:-}" ]]; then
+  if command -v zsh >/dev/null 2>&1; then
+    exec zsh "$0" "$@"
+  fi
+  echo "Error: zsh is required to run this script." >&2
+  exit 1
+fi
+
 # ig-trim: Review who you follow but doesn’t follow you back
 # - No args UX with defaults
 # - Single-key controls (no Enter), robust TTY handling
@@ -59,7 +68,7 @@ drain_tty() {
 # Read single key (no Enter) from FD 3. Echo newline. Drain residuals.
 # Returns: key in $reply (zsh builtin), lowercased except capital O preserved.
 prompt_key() {
-  local msg="$1" key
+  local msg="$1" key=""
   print -n -u3 -- "$msg"
   local savein
   exec {savein}<&0
@@ -69,7 +78,7 @@ prompt_key() {
   exec {savein}<&-
   print -u3 ""
   drain_tty
-  if [[ -z "$key" ]]; then
+  if [[ -z "${key:-}" ]]; then
     reply="s"
   elif [[ "$key" == "O" ]]; then
     reply="O"
@@ -79,7 +88,7 @@ prompt_key() {
 }
 
 confirm_quit() {
-  local ans
+  local ans=""
   print -n -u3 -- "${YLW}Quit?${R} [y/N]: "
   local savein
   exec {savein}<&0
