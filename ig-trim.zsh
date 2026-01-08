@@ -130,8 +130,9 @@ _collect_usernames() {
     grep -aEho 'title="[A-Za-z0-9._]+"' "$files[@]" 2>/dev/null | sed -E 's/.*title="([A-Za-z0-9._]+)".*/\1/'
     # href="/username/"
     grep -aEho 'href="/[A-Za-z0-9._]+/"' "$files[@]" 2>/dev/null | sed -E 's#.*href="/([A-Za-z0-9._]+)/".*#\1#'
-    # Absolute URL https://www.instagram.com/username (works on single-line files)
-    grep -aEho 'https?://(www\.)?instagram\.com/[A-Za-z0-9._]+' "$files[@]" 2>/dev/null | sed -E 's#https?://(www\.)?instagram\.com/##'
+    # Absolute URL https://www.instagram.com/_u/username or .../username
+    grep -aEho 'https?://(www\.)?instagram\.com/[A-Za-z0-9._/?=-]+' "$files[@]" 2>/dev/null | \
+      sed -E 's#https?://(www\.)?instagram\.com/##; s#^_u/##; s#[/?].*$##'
   } | awk '{print tolower($0)}' | \
       grep -avE '^(explore|accounts|about|privacy|terms|directory|stories|create|challenge|web|p|tv|reels|about|press|blog|legal|topics|changelog)$' | \
       sed '/^$/d' | sort -u
